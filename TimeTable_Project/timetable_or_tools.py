@@ -117,12 +117,8 @@ def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_l
                 model.Add(bslot == sum(is_start[v] for v in covering_starts))
             else:
                 model.Add(bslot == 0)
-
-    # Each slot has at most 1 task (class no-overlap enforced by intervals, but keep consistency)
     for slot in range(T):
         model.Add(sum(occ[(i, slot)] for i in range(len(tasks))) <= 1)
-
-    # Staff daily load
     for staff, ints in staff_to_intervals.items():
         for d in range(DAYS):
             slots_day = range(d*PERIODS, (d+1)*PERIODS)
@@ -134,8 +130,6 @@ def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_l
                     staff_occ.append(occ[(i, slot)])
             if staff_occ:
                 model.Add(sum(staff_occ) <= staff_daily_limit)
-
-    # Build subj_slot[(subject,slot)] boolean channeling with occ's
     subjects_set = sorted(set(t["subject_id"] for t in tasks))
     subj_slot = {}
     subject_task_indices = defaultdict(list)
@@ -151,35 +145,24 @@ def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_l
                 model.Add(sum(occ[(i, slot)] for i in inds) == b)
             else:
                 model.Add(b == 0)
-
-    # Soft constraints:
-    adj_bools = []        # adjacent same-subject in same day
-    double_day_flags = [] # subject has >=2 occurrences on a day
-    over2_ints = []       # occurrences beyond 2 per day (integer)
-    gap_bools = []        # pattern occupied-empty-occupied
-
-    # Adjacent penalty and gap detection and per-day counts
+                
+    adj_bools = []       
+    double_day_flags = [] 
+    over2_ints = []       
+    gap_bools = []        
+    
     for subj in subjects_set:
         for d in range(DAYS):
-            # count occurrences this day for subject
             slots_day = [d*PERIODS + p for p in range(PERIODS)]
             sum_slots = sum(subj_slot[(subj, s)] for s in slots_day)
-            # double day indicator
             dbl = model.NewBoolVar(f"double_{subj}_day{d}")
             double_day_flags.append(dbl)
-            # If sum_slots >= 2 => dbl=1; if sum_slots <=1 => dbl=0
             model.Add(sum_slots >= 2).OnlyEnforceIf(dbl)
             model.Add(sum_slots <= 1).OnlyEnforceIf(dbl.Not())
-
-            # over2 integer: max(0, sum_slots - 2)
             over2 = model.NewIntVar(0, PERIODS, f"over2_{subj}_day{d}")
             over2_ints.append(over2)
-            # over2 >= sum_slots - 2
             model.Add(over2 >= sum_slots - 2)
-            # over2 <= sum_slots (trivial)
             model.Add(over2 <= sum_slots)
-
-            # adjacent
             for p in range(PERIODS - 1):
                 s1 = d*PERIODS + p
                 s2 = d*PERIODS + p + 1
@@ -190,41 +173,34 @@ def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_l
                 model.Add(vb >= subj_slot[(subj, s1)] + subj_slot[(subj, s2)] - 1)
                 adj_bools.append(vb)
 
-    # Gaps penalty: occupied - empty - occupied pattern in a day
     for d in range(DAYS):
         for p in range(PERIODS - 2):
             slot1 = d*PERIODS + p
             slot2 = d*PERIODS + p + 1
             slot3 = d*PERIODS + p + 2
-            # occ_any_slot = sum over subj_slot of subj occupying that slot (since at most one subject per slot)
-            # We can build occ_any slot by summing subj_slot over subjects
+        
             occ1 = model.NewBoolVar(f"occ_any_{slot1}")
             occ2 = model.NewBoolVar(f"occ_any_{slot2}")
             occ3 = model.NewBoolVar(f"occ_any_{slot3}")
-            # occ1 == sum subj_slot(subj,slot1) (0/1)
+          
             model.Add(sum(subj_slot[(s, slot1)] for s in subjects_set) == occ1)
             model.Add(sum(subj_slot[(s, slot2)] for s in subjects_set) == occ2)
             model.Add(sum(subj_slot[(s, slot3)] for s in subjects_set) == occ3)
-            # gap bool: occ1==1 and occ2==0 and occ3==1
+            
             gapb = model.NewBoolVar(f"gap_{d}_{p}")
             model.Add(gapb <= occ1)
             model.Add(gapb <= occ3)
             model.Add(gapb <= (1 - occ2))
-            # ensure gapb implies occ1=1 and occ3=1 and occ2=0 via implications
+            
             model.Add(occ1 == 1).OnlyEnforceIf(gapb)
             model.Add(occ3 == 1).OnlyEnforceIf(gapb)
             model.Add(occ2 == 0).OnlyEnforceIf(gapb)
             gap_bools.append(gapb)
-
-    # Objective: weighted combination
     adj_sum = sum(adj_bools)
     double_day_sum = sum(double_day_flags)
     over2_sum = sum(over2_ints)
     gap_sum = sum(gap_bools)
-
     model.Minimize(w_adj * adj_sum + w_double_day * double_day_sum + w_gaps * gap_sum + w_over2 * over2_sum)
-
-    # Solve
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = time_limit
     solver.parameters.num_search_workers = 8
@@ -249,10 +225,6 @@ def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_l
         "objective": solver.ObjectiveValue()
     }
     return schedule, penalty_info, "FEASIBLE"
-
-# ---------------------------
-# Run all classes and export
-# ---------------------------
 def run_all(input_file, output_file, time_limit_per_class=60, staff_daily_limit=5, no_one_lab_day=False):
     xl = pd.ExcelFile(input_file)
     subjects_sheet = find_sheet(xl, ["Subjects_Final"])#, "subjects", "subjects_final", "subjects_prepared"
@@ -266,14 +238,12 @@ def run_all(input_file, output_file, time_limit_per_class=60, staff_daily_limit=
     classes  = pd.read_excel(xl, sheet_name=classes_sheet)
     staffs   = pd.read_excel(xl, sheet_name=staffs_sheet)
 
-    # normalize column names
     subjects.columns = [c.strip() for c in subjects.columns]
     classes.columns = [c.strip() for c in classes.columns]
     staffs.columns = [c.strip() for c in staffs.columns]
 
     writer = pd.ExcelWriter(output_file, engine="openpyxl")
     diagnostics = []
-
     for _, cl in classes.iterrows():
         cid = cl["class_id"]
         print("[INFO] scheduling:", cid)
@@ -290,8 +260,6 @@ def run_all(input_file, output_file, time_limit_per_class=60, staff_daily_limit=
             pd.DataFrame([{"Message":f"No feasible timetable (status={status})"}]).to_excel(writer, sheet_name=f"{cid}_TT", index=False)
             diagnostics.append({"class_id": cid, "status": status, "penalty": None})
             continue
-
-        # Convert schedule to grid and fill "FREE"
         grid = []
         for d in range(DAYS):
             row = []
@@ -301,8 +269,6 @@ def run_all(input_file, output_file, time_limit_per_class=60, staff_daily_limit=
             grid.append(row)
         df = pd.DataFrame(grid, index=[f"Day{d+1}" for d in range(DAYS)], columns=[f"P{p+1}" for p in range(PERIODS)])
         df.to_excel(writer, sheet_name=f"{cid}_TT")
-
-        # Lookup sheet: subjects & staff for this class
         subs_for_class = subjects[subjects["class_id"] == cid][["subject_id", "subject_code", "subject_name", "main_staff_id", "supporting_staff_id"]].drop_duplicates()
         subs_for_class = subs_for_class.rename(columns={"main_staff_id":"staff_id"})
         if "name" in staffs.columns:
@@ -319,9 +285,6 @@ def run_all(input_file, output_file, time_limit_per_class=60, staff_daily_limit=
     writer.close()
     print("[DONE] Written:", output_file)
 
-# ---------------------------
-# CLI
-# ---------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="Prepared dataset Excel file")
@@ -332,4 +295,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_all(args.input, args.out, time_limit_per_class=args.time_limit, staff_daily_limit=args.staff_daily_limit, no_one_lab_day=args.no_one_lab_day)
+
 
