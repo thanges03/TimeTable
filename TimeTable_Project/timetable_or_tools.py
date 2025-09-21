@@ -1,33 +1,13 @@
-#!/usr/bin/env python3
-"""
-timetable_solver_spread_balance.py
-
-Per-class CP-SAT timetable solver with:
- - Hard constraints: class & staff no-overlap, lab contiguous (2), one-lab-per-day, staff daily limit.
- - Soft constraints (objective): minimize adjacent same-subjects, minimize subject double-days across week,
-   minimize "gaps" (occupied-empty-occupied), penalize occurrences beyond 2 per day.
-
-Inputs:
- - Excel with sheets: Subjects_Final, Classes_Cleaned, Staffs_Cleaned (auto-detected)
-
-Outputs:
- - Excel with per-class timetable sheets (<CLASSID>_TT), lookups (<CLASSID>_Lookup), Diagnostics sheet.
-"""
-
 import argparse
 import pandas as pd
 import math
 from ortools.sat.python import cp_model
 from collections import defaultdict
 
-# Constants
 DAYS = 5
 PERIODS = 8
 SLOTS = DAYS * PERIODS
 
-# ---------------------------
-# Helpers
-# ---------------------------
 def find_sheet(xl, candidates):
     low = [s.lower() for s in xl.sheet_names]
     for c in candidates:
@@ -38,10 +18,6 @@ def find_sheet(xl, candidates):
     return None
 
 def expand_tasks_for_class(subjects_df, class_row):
-    """Expand subjects into tasks for this class.
-    Theory -> hours many tasks with duration 1
-    Lab -> sessions ceil(hours/2) and batches ceil(strength/30), each task duration 2
-    """
     cid = class_row["class_id"]
     strength = int(class_row.get("strength", 60))
     rows = subjects_df[subjects_df["class_id"] == cid]
@@ -88,46 +64,27 @@ def expand_tasks_for_class(subjects_df, class_row):
                 })
     return tasks
 
-# ---------------------------
-# Solver for single class
-# ---------------------------
-def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_limit=60,
-                w_adj=12, w_double_day=6, w_gaps=8, w_over2=10):
-    """
-    tasks: list of task dicts (duration 1 or 2)
-    Returns: schedule(list length SLOTS of subject_id or ""), penalty_info dict, status string
-    """
+def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_limit=60,w_adj=12, w_double_day=6, w_gaps=8, w_over2=10):
     if not tasks:
         return None, None, "NO_TASKS"
-
     model = cp_model.CpModel()
     T = SLOTS
-
-    # Create start vars and Add domain restrictions for labs (cannot start at last period of day)
     for t in tasks:
         dur = t["duration"]
         t["start"] = model.NewIntVar(0, T - dur, f"start_{t['task_id']}")
         t["end"]   = model.NewIntVar(0, T, f"end_{t['task_id']}")
         t["interval"] = model.NewIntervalVar(t["start"], dur, t["end"], f"int_{t['task_id']}")
-
-        # For labs (duration=2), forbid starting at last period of day
         if dur == 2:
             for d in range(DAYS):
                 forbidden_start = d*PERIODS + (PERIODS - 1)
                 model.Add(t["start"] != forbidden_start)
-
-    # Class no-overlap (all intervals)
     model.AddNoOverlap([t["interval"] for t in tasks])
-
-    # Staff no-overlap
     staff_to_intervals = defaultdict(list)
     for t in tasks:
         staff_to_intervals[t["staff"]].append(t["interval"])
     for staff, ints in staff_to_intervals.items():
         if len(ints) > 1:
             model.AddNoOverlap(ints)
-
-    # One lab per class per day (hard)
     if enforce_one_lab_per_day:
         for d in range(DAYS):
             lab_flags = []
@@ -141,34 +98,24 @@ def solve_class(tasks, staff_daily_limit=5, enforce_one_lab_per_day=True, time_l
                     lab_flags.append(b)
             if lab_flags:
                 model.Add(sum(lab_flags) <= 1)
-
-    # Occupancy boolean occ[i,slot] for each task i and slot
     occ = {}
     for i, t in enumerate(tasks):
         dur = t["duration"]
-        # possible starts range 0..T-dur
         possible_starts = range(0, T - dur + 1)
-        # is_start(i,v) booleans
         is_start = {}
         for v in possible_starts:
             b = model.NewBoolVar(f"isstart_{i}_{v}")
             is_start[v] = b
             model.Add(t["start"] == v).OnlyEnforceIf(b)
             model.Add(t["start"] != v).OnlyEnforceIf(b.Not())
-        # exactly one start
         model.Add(sum(is_start[v] for v in possible_starts) == 1)
-
-        # Now define occ(i,slot) using the is_start booleans
         for slot in range(T):
             bslot = model.NewBoolVar(f"occ_{i}_{slot}")
             occ[(i, slot)] = bslot
-            # If a start v covers this slot then bslot == 1 when is_start_v is true for the covering v
             covering_starts = [v for v in possible_starts if v <= slot < v + dur]
             if covering_starts:
-                # bslot == sum(is_start[v] for v in covering_starts)  (sum is 0 or 1 because exactly one start)
                 model.Add(bslot == sum(is_start[v] for v in covering_starts))
             else:
-                # not coverable -> must be 0
                 model.Add(bslot == 0)
 
     # Each slot has at most 1 task (class no-overlap enforced by intervals, but keep consistency)
@@ -385,3 +332,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     run_all(args.input, args.out, time_limit_per_class=args.time_limit, staff_daily_limit=args.staff_daily_limit, no_one_lab_day=args.no_one_lab_day)
+
